@@ -1,6 +1,8 @@
 # osmdb-extract
 
-`osmdb-extract` is a command-line tool for creating geospatial extracts from an [osmdb](https://github.com/HelloJowet/osmdb) database. It creates geometries for OpenStreetMap ways and relations as it processes them, so you can produce useful layers without loading a large OSM dataset or its geometries into memory at once.
+`osmdb-extract` is a command-line tool that turns an [osmdb](https://github.com/HelloJowet/osmdb) database into typed geospatial datasets. Define layers in Lua to select OpenStreetMap nodes, ways, and relations, retain the attributes you need, and write the result as GeoPackage or GeoParquet.
+
+It builds way and relation geometries as it streams through the database, letting you create focused OSM extracts without loading the entire source dataset or all of its geometry into memory.
 
 Use a small Lua script to choose which OpenStreetMap objects become rows, which attributes to keep, and which geometry to write. The result is a typed GeoPackage or GeoParquet dataset.
 

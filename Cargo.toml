@@ -1,10 +1,15 @@
 [package]
-name = "osmdb_extract"
+name = "osmdb-extract"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Extract typed geospatial layers from osmdb databases with Lua"
+description = "Extract OpenStreetMap data from osmdb into typed GeoPackage and GeoParquet layers with Lua"
 license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/HelloJowet/osmdb-extract"
+homepage = "https://github.com/HelloJowet/osmdb-extract"
+keywords = ["openstreetmap", "osm", "geospatial", "geopackage", "geoparquet"]
+categories = ["command-line-utilities", "science::geo"]
 
 [[bin]]
 name = "osmdb-extract"
