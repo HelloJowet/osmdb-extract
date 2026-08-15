@@ -1,0 +1,34 @@
+[package]
+name = "osmdb_extract"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Extract typed geospatial layers from osmdb databases with Lua"
+license = "Apache-2.0"
+
+[[bin]]
+name = "osmdb-extract"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+arrow-array = "58"
+arrow-schema = "58"
+clap = { version = "4.5", features = ["derive"] }
+crossbeam-channel = "0.5"
+geo-types = "0.7"
+geoarrow-array = "0.8"
+geoarrow-schema = "0.8"
+geoparquet = "0.8"
+mlua = { version = "0.11.4", features = ["lua54", "vendored", "send"] }
+osmdb = "0.1.0"
+parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
+rayon = "1.11"
+rusqlite = { version = "0.39", features = ["bundled"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wkb = "0.9"
+
+[dev-dependencies]
+tempfile = "3.20"
