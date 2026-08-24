@@ -102,12 +102,26 @@ osmdb-extract \
 
 `osmdb.wikidata(id)` returns the stored entity as a nested Lua table, or `nil` when the ID is absent, the store is not configured, or no entity exists. It looks up one canonical uppercase item, property, or lexeme ID (`Q`, `P`, or `L`) at a time.
 
+Claims are grouped by property ID. Each property contains statements. Read a statement value from `statement.mainsnak.datavalue.value` when its `snaktype` is `"value"`; statements can also have a rank and qualifiers.
+
+`examples/places.lua` reads population (`P1082`), images (`P18`), and external IDs (`P646`, `P2671`) this way:
+
 ```lua
 local entity = osmdb.wikidata(object.tags.wikidata)
-if entity and entity.claims.P31 then
-    places:insert({ osm_id = object.id, wikidata = entity })
+local claims = entity and entity.claims or {}
+
+for _, statement in ipairs(claims.P1082 or {}) do
+    if statement.rank ~= "deprecated" then
+        local snak = statement.mainsnak
+        if snak.snaktype == "value" then
+            local population = snak.datavalue.value.amount
+            -- P585 qualifiers can be used to select the most recent value.
+        end
+    end
 end
 ```
+
+For population, the example ignores deprecated statements, chooses the newest value with a `P585` date qualifier, then falls back to the first preferred or normal value. It keeps all valid images and uses the first preferred or normal external ID.
 
 The lookup does not download or create a store, split multi-ID tag values, or follow related entities. Invalid IDs and store read errors stop extraction.
 
