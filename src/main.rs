@@ -27,6 +27,10 @@ struct Cli {
     #[arg(long)]
     output: PathBuf,
 
+    /// Optional local wikidata_store directory for Lua entity lookups.
+    #[arg(long)]
+    wikidata_store: Option<PathBuf>,
+
     /// Number of parallel Lua workers.
     #[arg(long, default_value_t = default_threads())]
     threads: usize,
@@ -60,6 +64,7 @@ fn main() -> Result<()> {
         format: cli.format,
         output: cli.output.clone(),
         threads: cli.threads,
+        wikidata_store: cli.wikidata_store,
     })?;
     println!(
         "Wrote {} rows to {} ({} nodes, {} ways, {} relations processed; {} skipped for geometry)",

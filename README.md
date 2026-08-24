@@ -1,10 +1,8 @@
 # osmdb-extract
 
-`osmdb-extract` is a command-line tool that turns an [osmdb](https://github.com/HelloJowet/osmdb) database into typed geospatial datasets. Define layers in Lua to select OpenStreetMap nodes, ways, and relations, retain the attributes you need, and write the result as GeoPackage or GeoParquet.
+`osmdb-extract` turns an [osmdb](https://github.com/HelloJowet/osmdb) database into typed GeoPackage or GeoParquet datasets. Use a small Lua script to choose OpenStreetMap nodes, ways, or relations; keep the attributes you need; and write their geometry.
 
-It builds way and relation geometries as it streams through the database, letting you create focused OSM extracts without loading the entire source dataset or all of its geometry into memory.
-
-Use a small Lua script to choose which OpenStreetMap objects become rows, which attributes to keep, and which geometry to write. The result is a typed GeoPackage or GeoParquet dataset.
+Way and relation geometry is built while the database is streamed, so focused extracts do not require loading the whole source dataset into memory.
 
 ## Quick start
 
@@ -14,7 +12,7 @@ Install the CLI:
 cargo install osmdb-extract
 ```
 
-You need an existing osmdb database directory containing `data.rocksdb` and `locations.bin`. See the [osmdb project](https://github.com/HelloJowet/osmdb) for creating one.
+You need an osmdb database directory containing `data.rocksdb` and `locations.bin`. See the [osmdb project](https://github.com/HelloJowet/osmdb) for how to create one.
 
 Run the bundled example to extract cafés and major roads into a GeoPackage:
 
@@ -27,26 +25,27 @@ osmdb-extract \
   -v
 ```
 
-The script creates a `cafes` point layer and a `roads` line layer. Use `--threads 8` to set the number of parallel Lua workers; by default, all available CPU cores are used.
+This creates a `cafes` point layer and a `roads` line layer.
 
-## Outputs and examples
+## Using the CLI
 
 - `--format geopackage` writes one new `.gpkg` file.
-- `--format geoparquet` writes a new directory containing one `<layer>.parquet` file per Lua layer. Spatial layers include GeoParquet metadata, while layers without geometry are ordinary Parquet tables.
-- Existing output paths are refused. Output is first written beside the destination and renamed only after extraction succeeds.
+- `--format geoparquet` writes a directory with one `<layer>.parquet` file per layer. Layers with geometry include GeoParquet metadata; other layers are regular Parquet tables.
+- Existing output paths are refused. Extraction writes beside the destination, then renames the result only after success.
+- Use `--threads 8` to choose the number of parallel Lua workers. By default, all available CPU cores are used.
+- Use `-v` for progress and `-vv` for diagnostics about geometry that could not be created. The final summary includes processed objects, written rows, and skipped geometries.
 
-The `examples/` directory contains scripts you can adapt:
+Adapt a script from `examples/`:
 
-- `basic.lua` extracts café points and major-road lines.
-- `cafes.lua` extracts a small point layer for one amenity.
-- `major_roads.lua` extracts motorway, trunk, and primary ways.
-- `route_metadata.lua` writes route-relation attributes without building relation geometry.
+- `basic.lua`: café points and major-road lines.
+- `cafes.lua`: a single amenity point layer.
+- `major_roads.lua`: motorway, trunk, and primary ways.
+- `places.lua`: named settlements enriched from an optional local Wikidata store.
+- `route_metadata.lua`: route attributes without relation geometry.
 
-Use `-v` for progress information and `-vv` for diagnostics when geometry cannot be created. The final summary reports processed objects, written rows, and skipped geometries.
+## Write a Lua script
 
-## Lua scripts
-
-Define one or more layers when the script loads, then implement callbacks for the object types you need:
+Define layers when the script loads, then add a callback for each OSM object type you use. This example writes one row for every road-like way:
 
 ```lua
 local roads = osmdb.define_layer({
@@ -72,19 +71,56 @@ function osmdb.process_way(object)
 end
 ```
 
-Layers use `source = "node"`, `"way"`, or `"relation"` and may receive rows only from the matching callback. The available callbacks are `osmdb.process_node(object)`, `osmdb.process_way(object)`, and `osmdb.process_relation(object)`.
+Each layer has one source: `node`, `way`, or `relation`. Insert into it only from its matching callback: `osmdb.process_node(object)`, `osmdb.process_way(object)`, or `osmdb.process_relation(object)`.
 
-| Source     | Fields                                        | Geometry methods                                                     |
-| ---------- | --------------------------------------------- | -------------------------------------------------------------------- |
-| `node`     | `id`, `version`, `tags`, `lat`, `lon`         | `as_point()`                                                         |
-| `way`      | `id`, `version`, `tags`, `nodes`, `is_closed` | `as_linestring()`                                                    |
-| `relation` | `id`, `version`, `tags`, `members`            | `as_multipoint()`, `as_multilinestring()`, `as_geometrycollection()` |
+## Lua reference
+
+| Source | Available fields | Geometry methods |
+| --- | --- | --- |
+| `node` | `id`, `version`, `tags`, `lat`, `lon` | `as_point()` |
+| `way` | `id`, `version`, `tags`, `nodes`, `is_closed` | `as_linestring()` |
+| `relation` | `id`, `version`, `tags`, `members` | `as_multipoint()`, `as_multilinestring()`, `as_geometrycollection()` |
 
 Relation members have `type`, `id`, and `role`. Relation geometry follows nested relations, detects cycles, and uses EPSG:4326 coordinates.
 
-Supported column types are `string`, `int64`, `double`, `boolean`, `json`, `point`, `linestring`, `multipoint`, `multilinestring`, and `geometrycollection`. Columns are nullable unless `required = true`; each layer can have one geometry column. Layer and column names must be unique ASCII identifiers, and `fid` is reserved for GeoPackage. IDs are not added automatically, so include an ID column when you need one.
+Column types are `string`, `int64`, `double`, `boolean`, `json`, `point`, `linestring`, `multipoint`, `multilinestring`, and `geometrycollection`. Columns are nullable unless `required = true`; a layer can have one geometry column. Layer and column names must be unique ASCII identifiers, and `fid` is reserved for GeoPackage. Include an ID column when you need one; it is not added automatically.
 
-If geometry is missing, invalid, cyclic, or empty, all rows staged for that object are skipped and extraction continues. Invalid layer definitions, wrong value types, unknown fields, source mismatches, and geometry-type mismatches stop extraction with a script error.
+If an object's geometry is missing, invalid, cyclic, or empty, its staged rows are skipped and extraction continues. Invalid layer definitions, wrong value types, unknown fields, source mismatches, and geometry-type mismatches stop extraction with a script error.
+
+## Optional: Wikidata lookups
+
+To look up entities locally, create a read-only store with [wikidata_store](https://github.com/HelloJowet/wikidata_store) and pass it with `--wikidata-store`:
+
+```bash
+osmdb-extract \
+  --db ./region.osmdb \
+  --script ./with-wikidata.lua \
+  --wikidata-store ./wikidata.store \
+  --format geopackage \
+  --output region.gpkg
+```
+
+`osmdb.wikidata(id)` returns the stored entity as a nested Lua table, or `nil` when the ID is absent, the store is not configured, or no entity exists. It looks up one canonical uppercase item, property, or lexeme ID (`Q`, `P`, or `L`) at a time.
+
+```lua
+local entity = osmdb.wikidata(object.tags.wikidata)
+if entity and entity.claims.P31 then
+    places:insert({ osm_id = object.id, wikidata = entity })
+end
+```
+
+The lookup does not download or create a store, split multi-ID tag values, or follow related entities. Invalid IDs and store read errors stop extraction.
+
+`examples/places.lua` uses these lookups to enrich named settlements. Run it with a local store:
+
+```bash
+osmdb-extract \
+  --db ./region.osmdb \
+  --script examples/places.lua \
+  --wikidata-store ./wikidata.store \
+  --format geopackage \
+  --output places.gpkg
+```
 
 ## Roadmap
 

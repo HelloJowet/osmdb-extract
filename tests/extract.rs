@@ -2,14 +2,17 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use arrow_array::{Array, Int64Array, StringArray};
 use osmdb::database::BatchData;
 use osmdb::{
     Database, DatabaseConfig, DatabaseWriter, Location, LocationStoreWriter, Member, MemberType,
     Node, Relation, Way,
 };
 use osmdb_extract::{ExtractOptions, OutputFormat, extract};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use tempfile::TempDir;
+use wikidata_store::create_wikidata_store;
 
 fn tags(values: &[(&str, &str)]) -> HashMap<String, String> {
     values
@@ -31,7 +34,12 @@ fn fixture(root: &Path) -> PathBuf {
                 Node {
                     latitude: 10_000_000,
                     longitude: 20_000_000,
-                    tags: tags(&[("amenity", "cafe"), ("name", "One")]),
+                    tags: tags(&[
+                        ("amenity", "cafe"),
+                        ("name", "One"),
+                        ("place", "city"),
+                        ("wikidata", "Q42"),
+                    ]),
                     version: 1,
                 },
             ),
@@ -40,7 +48,12 @@ fn fixture(root: &Path) -> PathBuf {
                 Node {
                     latitude: 20_000_000,
                     longitude: 30_000_000,
-                    tags: tags(&[("amenity", "bench")]),
+                    tags: tags(&[
+                        ("amenity", "bench"),
+                        ("name", "Two"),
+                        ("place", "village"),
+                        ("wikidata", "Q43"),
+                    ]),
                     version: 2,
                 },
             ),
@@ -171,6 +184,107 @@ fn script(root: &Path, body: &str) -> PathBuf {
     path
 }
 
+fn wikidata_fixture(root: &Path) -> (PathBuf, serde_json::Value) {
+    let entity = serde_json::json!({
+        "id": "Q42",
+        "type": "item",
+        "labels": {
+            "en": { "language": "en", "value": "Douglas Adams" }
+        },
+        "aliases": { "en": [] },
+        "claims": {
+            "P31": [{
+                "id": "Q42$statement",
+                "mainsnak": {
+                    "snaktype": "value",
+                    "property": "P31",
+                    "datavalue": {
+                        "type": "wikibase-entityid",
+                        "value": { "entity-type": "item", "id": "Q5", "numeric-id": 5 }
+                    }
+                },
+                "type": "statement",
+                "rank": "normal",
+                "qualifiers": {},
+                "references": []
+            }],
+            "P1082": [
+                {
+                    "mainsnak": { "snaktype": "value", "datavalue": { "type": "quantity", "value": { "amount": "+150", "unit": "1" } } },
+                    "rank": "normal", "qualifiers": {}
+                },
+                {
+                    "mainsnak": { "snaktype": "value", "datavalue": { "type": "quantity", "value": { "amount": "+100", "unit": "1" } } },
+                    "rank": "normal", "qualifiers": { "P585": [{ "snaktype": "value", "datavalue": { "type": "time", "value": { "time": "+00000002020-01-01T00:00:00Z" } } }] }
+                },
+                {
+                    "mainsnak": { "snaktype": "value", "datavalue": { "type": "quantity", "value": { "amount": "+50", "unit": "1" } } },
+                    "rank": "preferred", "qualifiers": { "P585": [{ "snaktype": "value", "datavalue": { "type": "time", "value": { "time": "+00000002019-01-01T00:00:00Z" } } }] }
+                },
+                {
+                    "mainsnak": { "snaktype": "value", "datavalue": { "type": "quantity", "value": { "amount": "+200.5", "unit": "1" } } },
+                    "rank": "normal", "qualifiers": { "P585": [{ "snaktype": "value", "datavalue": { "type": "time", "value": { "time": "+00000002023-01-01T00:00:00Z" } } }] }
+                },
+                {
+                    "mainsnak": { "snaktype": "value", "datavalue": { "type": "quantity", "value": { "amount": "+999", "unit": "1" } } },
+                    "rank": "deprecated", "qualifiers": { "P585": [{ "snaktype": "value", "datavalue": { "type": "time", "value": { "time": "+00000002024-01-01T00:00:00Z" } } }] }
+                }
+            ],
+            "P18": [
+                { "mainsnak": { "snaktype": "value", "datavalue": { "type": "string", "value": "Spelterini Blüemlisalp.jpg" } }, "rank": "normal" },
+                { "mainsnak": { "snaktype": "value", "datavalue": { "type": "string", "value": "Example image.png" } }, "rank": "preferred" },
+                { "mainsnak": { "snaktype": "value", "datavalue": { "type": "string", "value": "Ignored.jpg" } }, "rank": "deprecated" }
+            ],
+            "P646": [
+                { "mainsnak": { "snaktype": "value", "datavalue": { "type": "string", "value": "/m/old" } }, "rank": "normal" },
+                { "mainsnak": { "snaktype": "value", "datavalue": { "type": "string", "value": "/m/new" } }, "rank": "preferred" }
+            ],
+            "P2671": [
+                { "mainsnak": { "snaktype": "value", "datavalue": { "type": "string", "value": "old-id" } }, "rank": "normal" },
+                { "mainsnak": { "snaktype": "value", "datavalue": { "type": "string", "value": "new-id" } }, "rank": "preferred" }
+            ]
+        },
+        "sitelinks": {},
+        "lastrevid": null
+    });
+    let undated_entity = serde_json::json!({
+        "id": "Q43",
+        "type": "item",
+        "labels": { "en": { "language": "en", "value": "Undated settlement" } },
+        "aliases": { "en": [] },
+        "claims": {
+            "P1082": [{
+                "mainsnak": { "snaktype": "value", "datavalue": { "type": "quantity", "value": { "amount": "+150", "unit": "1" } } },
+                "rank": "normal", "qualifiers": {}
+            }]
+        },
+        "sitelinks": {},
+        "lastrevid": null
+    });
+    let dump = root.join("wikidata.json");
+    fs::write(&dump, format!("{entity}\n{undated_entity}\n")).unwrap();
+    let store = root.join("wikidata.store");
+    create_wikidata_store(dump, &store).unwrap();
+    (store, entity)
+}
+
+const WIKIDATA_SCRIPT: &str = r#"
+local entities = osmdb.define_layer({ name = 'entities', source = 'node', columns = {
+    { name = 'osm_id', type = 'int64', required = true },
+    { name = 'wikidata', type = 'json', required = true },
+} })
+function osmdb.process_node(object)
+    if not object.tags.wikidata then return end
+    local entity = osmdb.wikidata(object.tags.wikidata)
+    if entity
+        and entity.labels.en.value == 'Douglas Adams'
+        and entity.claims.P31[1].mainsnak.datavalue.value.id == 'Q5'
+        and osmdb.wikidata('Q999999999') == nil then
+        entities:insert({ osm_id = object.id, wikidata = entity })
+    end
+end
+"#;
+
 const HAPPY_SCRIPT: &str = r#"
 local pois = osmdb.define_layer({ name = 'pois', source = 'node', columns = {
     { name = 'osm_id', type = 'int64', required = true },
@@ -216,6 +330,7 @@ fn writes_geopackage_and_skips_bad_geometry() {
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 2,
+        wikidata_store: None,
     })
     .unwrap();
     assert_eq!(summary.nodes_processed, 2);
@@ -296,6 +411,7 @@ fn writes_one_geoparquet_file_per_layer() {
         format: OutputFormat::Geoparquet,
         output: output.clone(),
         threads: 2,
+        wikidata_store: None,
     })
     .unwrap();
     assert_eq!(summary.rows_written, 7);
@@ -347,6 +463,7 @@ fn geometry_type_mismatch_aborts_without_publishing_output() {
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 2,
+        wikidata_store: None,
     })
     .unwrap_err();
     assert!(
@@ -376,8 +493,259 @@ fn rejects_existing_output() {
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 1,
+        wikidata_store: None,
     })
     .unwrap_err();
     assert!(error.to_string().contains("already exists"));
     assert_eq!(fs::read(output).unwrap(), b"keep me");
+}
+
+#[test]
+fn wikidata_lookup_is_available_to_parallel_lua_workers_and_preserves_json() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let script = script(temp.path(), WIKIDATA_SCRIPT);
+    let (wikidata_store, expected_entity) = wikidata_fixture(temp.path());
+
+    for format in [OutputFormat::Geopackage, OutputFormat::Geoparquet] {
+        let output = match format {
+            OutputFormat::Geopackage => temp.path().join("wikidata.gpkg"),
+            OutputFormat::Geoparquet => temp.path().join("wikidata-parquet"),
+        };
+        let summary = extract(ExtractOptions {
+            db: db.clone(),
+            script: script.clone(),
+            format,
+            output: output.clone(),
+            threads: 2,
+            wikidata_store: Some(wikidata_store.clone()),
+        })
+        .unwrap();
+        assert_eq!(summary.rows_written, 1);
+
+        let json = match format {
+            OutputFormat::Geopackage => {
+                let connection = rusqlite::Connection::open(output).unwrap();
+                connection
+                    .query_row("SELECT wikidata FROM entities", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                    .unwrap()
+            }
+            OutputFormat::Geoparquet => {
+                let file = fs::File::open(output.join("entities.parquet")).unwrap();
+                let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                let batch = reader.next().unwrap().unwrap();
+                batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(0)
+                    .to_owned()
+            }
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap(),
+            expected_entity
+        );
+    }
+}
+
+#[test]
+fn places_example_enriches_settlements_from_wikidata() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let script = script(temp.path(), include_str!("../examples/places.lua"));
+    let (wikidata_store, _) = wikidata_fixture(temp.path());
+
+    for format in [OutputFormat::Geopackage, OutputFormat::Geoparquet] {
+        let output = match format {
+            OutputFormat::Geopackage => temp.path().join("places.gpkg"),
+            OutputFormat::Geoparquet => temp.path().join("places-parquet"),
+        };
+        let summary = extract(ExtractOptions {
+            db: db.clone(),
+            script: script.clone(),
+            format,
+            output: output.clone(),
+            threads: 2,
+            wikidata_store: Some(wikidata_store.clone()),
+        })
+        .unwrap();
+        assert_eq!(summary.rows_written, 2);
+
+        let (population, images, freebase_id, knowledge_graph_id, undated_population) = match format
+        {
+            OutputFormat::Geopackage => {
+                let connection = rusqlite::Connection::open(output).unwrap();
+                let enriched = connection
+                    .query_row(
+                        "SELECT population, images, freebase_id, google_knowledge_graph_id FROM places WHERE osm_id = 1",
+                        [],
+                        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?)),
+                    )
+                    .unwrap();
+                let undated_population = connection
+                    .query_row(
+                        "SELECT population FROM places WHERE osm_id = 2",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap();
+                (
+                    enriched.0,
+                    enriched.1,
+                    enriched.2,
+                    enriched.3,
+                    undated_population,
+                )
+            }
+            OutputFormat::Geoparquet => {
+                let file = fs::File::open(output.join("places.parquet")).unwrap();
+                let mut reader = ParquetRecordBatchReaderBuilder::try_new(file)
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                let batch = reader.next().unwrap().unwrap();
+                let ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let index = (0..ids.len()).find(|&index| ids.value(index) == 1).unwrap();
+                let undated_index = (0..ids.len()).find(|&index| ids.value(index) == 2).unwrap();
+                let population = batch
+                    .column(3)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap();
+                let images = batch
+                    .column(4)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let freebase = batch
+                    .column(5)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let knowledge_graph = batch
+                    .column(6)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                (
+                    population.value(index),
+                    images.value(index).to_owned(),
+                    freebase.value(index).to_owned(),
+                    knowledge_graph.value(index).to_owned(),
+                    population.value(undated_index),
+                )
+            }
+        };
+
+        assert_eq!(population, 100);
+        assert_eq!(freebase_id, "/m/new");
+        assert_eq!(knowledge_graph_id, "new-id");
+        assert_eq!(undated_population, 150);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&images).unwrap(),
+            vec![
+                "Spelterini Blüemlisalp.jpg",
+                "Example image.png",
+            ]
+        );
+    }
+}
+
+#[test]
+fn wikidata_lookup_returns_nil_when_no_store_is_configured() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let script = script(
+        temp.path(),
+        r#"
+        local output = osmdb.define_layer({ name = 'without_wikidata', source = 'node', columns = {
+            { name = 'osm_id', type = 'int64', required = true },
+        } })
+        function osmdb.process_node(object)
+            if osmdb.wikidata('Q42') == nil then
+                output:insert({ osm_id = object.id })
+            end
+        end
+    "#,
+    );
+    let output = temp.path().join("without-wikidata.gpkg");
+    let summary = extract(ExtractOptions {
+        db,
+        script,
+        format: OutputFormat::Geopackage,
+        output,
+        threads: 2,
+        wikidata_store: None,
+    })
+    .unwrap();
+    assert_eq!(summary.rows_written, 2);
+}
+
+#[test]
+fn invalid_wikidata_id_aborts_without_publishing_output() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let (wikidata_store, _) = wikidata_fixture(temp.path());
+    let script = script(
+        temp.path(),
+        r#"
+        local output = osmdb.define_layer({ name = 'invalid', source = 'node', columns = {
+            { name = 'osm_id', type = 'int64', required = true },
+        } })
+        function osmdb.process_node(object)
+            pcall(function() osmdb.wikidata('q42') end)
+            output:insert({ osm_id = object.id })
+        end
+    "#,
+    );
+    let output = temp.path().join("invalid-wikidata.gpkg");
+    let error = extract(ExtractOptions {
+        db,
+        script,
+        format: OutputFormat::Geopackage,
+        output: output.clone(),
+        threads: 2,
+        wikidata_store: Some(wikidata_store),
+    })
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("Unsupported Wikidata entity ID: q42"),
+        "{error:#}"
+    );
+    assert!(!output.exists());
+}
+
+#[test]
+fn invalid_wikidata_store_fails_before_creating_output() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let script = script(temp.path(), HAPPY_SCRIPT);
+    let wikidata_store = temp.path().join("invalid-wikidata.store");
+    fs::create_dir(&wikidata_store).unwrap();
+    let output = temp.path().join("invalid-store.gpkg");
+    let error = extract(ExtractOptions {
+        db,
+        script,
+        format: OutputFormat::Geopackage,
+        output: output.clone(),
+        threads: 1,
+        wikidata_store: Some(wikidata_store),
+    })
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("failed to open Wikidata store"),
+        "{error:#}"
+    );
+    assert!(!output.exists());
 }

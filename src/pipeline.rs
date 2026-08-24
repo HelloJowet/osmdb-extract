@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use crossbeam_channel::bounded;
 use osmdb::{Database, DatabaseConfig, DatabaseReader, LOCATION_STORE_FILENAME};
+use wikidata_store::WikidataStore;
 
 use crate::geometry::GeometryResolver;
 use crate::lua::{LuaWorker, ObjectOutcome};
@@ -28,6 +29,7 @@ pub struct ExtractOptions {
     pub format: OutputFormat,
     pub output: PathBuf,
     pub threads: usize,
+    pub wikidata_store: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -73,6 +75,15 @@ pub fn extract(options: ExtractOptions) -> Result<ExtractSummary> {
     validate_options(&options)?;
     let script = fs::read(&options.script)
         .with_context(|| format!("failed to read Lua script '{}'", options.script.display()))?;
+    let wikidata_store = options
+        .wikidata_store
+        .as_ref()
+        .map(|path| {
+            WikidataStore::open(path)
+                .with_context(|| format!("failed to open Wikidata store '{}'", path.display()))
+                .map(Arc::new)
+        })
+        .transpose()?;
 
     let rocksdb_path = options.db.join("data.rocksdb");
     let location_path = options.db.join(LOCATION_STORE_FILENAME);
@@ -93,7 +104,11 @@ pub fn extract(options: ExtractOptions) -> Result<ExtractSummary> {
             Arc::clone(&database),
             &location_path,
         )?);
-        workers.push(Mutex::new(LuaWorker::new(&script, resolver)?));
+        workers.push(Mutex::new(LuaWorker::new_with_wikidata_store(
+            &script,
+            resolver,
+            wikidata_store.clone(),
+        )?));
     }
     let layers = workers[0].lock().unwrap().layers().to_vec();
     for (index, worker) in workers.iter().enumerate().skip(1) {

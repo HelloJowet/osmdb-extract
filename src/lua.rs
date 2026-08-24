@@ -3,8 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use geo_types::Geometry;
-use mlua::{Function, Lua, Table, UserData, UserDataFields, UserDataMethods, Value as LuaValue};
+use mlua::{
+    Function, Lua, LuaSerdeExt, Table, UserData, UserDataFields, UserDataMethods, Value as LuaValue,
+};
 use osmdb::{MemberType, Node, Relation, Way};
+use wikidata_store::WikidataStore;
 
 use crate::geometry::{GeometryResolver, RelationGeometryKind};
 use crate::schema::{
@@ -120,7 +123,7 @@ impl LayerHandle {
     }
 }
 
-fn convert_value(_lua: &Lua, value: LuaValue, column: &ColumnDef) -> Result<OutputValue> {
+fn convert_value(lua: &Lua, value: LuaValue, column: &ColumnDef) -> Result<OutputValue> {
     match column.column_type {
         ColumnType::String => match value {
             LuaValue::String(value) => Ok(OutputValue::String(value.to_str()?.to_owned())),
@@ -148,7 +151,7 @@ fn convert_value(_lua: &Lua, value: LuaValue, column: &ColumnDef) -> Result<Outp
             _ => bail!("expected boolean"),
         },
         ColumnType::Json => Ok(OutputValue::Json(serde_json::to_string(&lua_to_json(
-            value, 0,
+            lua, value, 0,
         )?)?)),
         expected if expected.is_geometry() => {
             let LuaValue::UserData(value) = value else {
@@ -170,7 +173,7 @@ fn convert_value(_lua: &Lua, value: LuaValue, column: &ColumnDef) -> Result<Outp
     }
 }
 
-fn lua_to_json(value: LuaValue, depth: usize) -> Result<serde_json::Value> {
+fn lua_to_json(lua: &Lua, value: LuaValue, depth: usize) -> Result<serde_json::Value> {
     if depth > 64 {
         bail!("JSON value exceeds maximum nesting depth of 64");
     }
@@ -182,7 +185,11 @@ fn lua_to_json(value: LuaValue, depth: usize) -> Result<serde_json::Value> {
             .map(serde_json::Value::Number)
             .ok_or_else(|| anyhow!("JSON number must be finite")),
         LuaValue::String(value) => Ok(value.to_str()?.to_owned().into()),
+        LuaValue::LightUserData(value) if value.0.is_null() => Ok(serde_json::Value::Null),
         LuaValue::Table(table) => {
+            let marked_as_array = table
+                .metatable()
+                .is_some_and(|metatable| metatable == lua.array_metatable());
             let mut entries = Vec::new();
             let mut integer_keys = true;
             for pair in table.pairs::<LuaValue, LuaValue>() {
@@ -190,7 +197,7 @@ fn lua_to_json(value: LuaValue, depth: usize) -> Result<serde_json::Value> {
                 integer_keys &= matches!(key, LuaValue::Integer(_));
                 entries.push((key, value));
             }
-            if !entries.is_empty() && integer_keys {
+            if (marked_as_array || !entries.is_empty()) && integer_keys {
                 entries.sort_by_key(|(key, _)| match key {
                     LuaValue::Integer(value) => *value,
                     _ => 0,
@@ -202,7 +209,7 @@ fn lua_to_json(value: LuaValue, depth: usize) -> Result<serde_json::Value> {
                 }
                 entries
                     .into_iter()
-                    .map(|(_, value)| lua_to_json(value, depth + 1))
+                    .map(|(_, value)| lua_to_json(lua, value, depth + 1))
                     .collect::<Result<Vec<_>>>()
                     .map(serde_json::Value::Array)
             } else {
@@ -211,7 +218,10 @@ fn lua_to_json(value: LuaValue, depth: usize) -> Result<serde_json::Value> {
                     let LuaValue::String(key) = key else {
                         bail!("JSON object keys must be strings");
                     };
-                    object.insert(key.to_str()?.to_owned(), lua_to_json(value, depth + 1)?);
+                    object.insert(
+                        key.to_str()?.to_owned(),
+                        lua_to_json(lua, value, depth + 1)?,
+                    );
                 }
                 Ok(serde_json::Value::Object(object))
             }
@@ -392,6 +402,14 @@ pub struct LuaWorker {
 
 impl LuaWorker {
     pub fn new(script: &[u8], resolver: Arc<GeometryResolver>) -> Result<Self> {
+        Self::new_with_wikidata_store(script, resolver, None)
+    }
+
+    pub fn new_with_wikidata_store(
+        script: &[u8],
+        resolver: Arc<GeometryResolver>,
+        wikidata_store: Option<Arc<WikidataStore>>,
+    ) -> Result<Self> {
         let lua = Lua::new();
         let state = Arc::new(Mutex::new(WorkerState::default()));
         let registry = Arc::new(Mutex::new(Vec::<LayerDef>::new()));
@@ -419,6 +437,36 @@ impl LuaWorker {
                 })
             })?,
         )?;
+        api.set("wikidata", {
+            let lookup_state = Arc::clone(&state);
+            lua.create_function(move |lua, entity_id: Option<String>| {
+                let Some(entity_id) = entity_id else {
+                    return Ok(LuaValue::Nil);
+                };
+                let Some(store) = &wikidata_store else {
+                    return Ok(LuaValue::Nil);
+                };
+                let json = match store.get_entity_json(&entity_id) {
+                    Ok(Some(json)) => json,
+                    Ok(None) => return Ok(LuaValue::Nil),
+                    Err(error) => {
+                        let message = format!("Wikidata lookup for '{entity_id}' failed: {error}");
+                        lookup_state.lock().unwrap().fatal_error = Some(message.clone());
+                        return Err(mlua::Error::RuntimeError(message));
+                    }
+                };
+                let entity: serde_json::Value = match serde_json::from_slice(&json) {
+                    Ok(entity) => entity,
+                    Err(error) => {
+                        let message =
+                            format!("Wikidata entity '{entity_id}' is not valid JSON: {error}");
+                        lookup_state.lock().unwrap().fatal_error = Some(message.clone());
+                        return Err(mlua::Error::RuntimeError(message));
+                    }
+                };
+                lua.to_value(&entity)
+            })?
+        })?;
         lua.globals().set("osmdb", api)?;
         lua.load(script)
             .set_name("extract script")

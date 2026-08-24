@@ -25,7 +25,7 @@ geo-types = "0.7"
 geoarrow-array = "0.8"
 geoarrow-schema = "0.8"
 geoparquet = "0.8"
-mlua = { version = "0.11.4", features = ["lua54", "vendored", "send"] }
+mlua = { version = "0.11.4", features = ["lua54", "vendored", "send", "serde"] }
 osmdb = "0.1.0"
 parquet = { version = "58", default-features = false, features = ["arrow", "zstd"] }
 rayon = "1.11"
@@ -33,6 +33,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wikidata_store = "0.1.2"
 wkb = "0.9"
 
 [dev-dependencies]
