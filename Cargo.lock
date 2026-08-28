@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "osmdb-extract"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "arrow-array",

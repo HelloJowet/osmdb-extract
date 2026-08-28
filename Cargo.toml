@@ -1,9 +1,9 @@
 [package]
 name = "osmdb-extract"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
-description = "Extract OpenStreetMap data from osmdb into typed GeoPackage and GeoParquet layers with Lua"
+description = "Combine OpenStreetMap and Wikidata into GeoPackage or GeoParquet with low-memory geometry construction"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/HelloJowet/osmdb-extract"
