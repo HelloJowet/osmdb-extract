@@ -179,7 +179,11 @@ fn fixture(root: &Path) -> PathBuf {
 }
 
 fn script(root: &Path, body: &str) -> PathBuf {
-    let path = root.join("extract.lua");
+    script_named(root, "extract.lua", body)
+}
+
+fn script_named(root: &Path, name: &str, body: &str) -> PathBuf {
+    let path = root.join(name);
     fs::write(&path, body).unwrap();
     path
 }
@@ -319,6 +323,165 @@ end
 "#;
 
 #[test]
+fn combines_multiple_scripts_in_one_output() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let nodes = script_named(
+        temp.path(),
+        "nodes.lua",
+        r#"
+        local nodes = osmdb.define_layer({ name = 'script_nodes', source = 'node', columns = {
+            { name = 'osm_id', type = 'int64', required = true },
+        } })
+        function osmdb.process_node(object)
+            nodes:insert({ osm_id = object.id })
+        end
+        "#,
+    );
+    let ways = script_named(
+        temp.path(),
+        "ways.lua",
+        r#"
+        local ways = osmdb.define_layer({ name = 'script_ways', source = 'way', columns = {
+            { name = 'osm_id', type = 'int64', required = true },
+        } })
+        function osmdb.process_way(object)
+            ways:insert({ osm_id = object.id })
+        end
+        "#,
+    );
+
+    for format in [OutputFormat::Geopackage, OutputFormat::Geoparquet] {
+        let output = match format {
+            OutputFormat::Geopackage => temp.path().join("multiple.gpkg"),
+            OutputFormat::Geoparquet => temp.path().join("multiple-parquet"),
+        };
+        let summary = extract(ExtractOptions {
+            db: db.clone(),
+            scripts: vec![nodes.clone(), ways.clone()],
+            format,
+            output: output.clone(),
+            threads: 2,
+            wikidata_store: None,
+        })
+        .unwrap();
+
+        assert_eq!(summary.nodes_processed, 2);
+        assert_eq!(summary.ways_processed, 2);
+        assert_eq!(summary.relations_processed, 5);
+        assert_eq!(summary.rows_written, 4);
+        match format {
+            OutputFormat::Geopackage => {
+                let connection = rusqlite::Connection::open(output).unwrap();
+                for layer in ["script_nodes", "script_ways"] {
+                    let count: i64 = connection
+                        .query_row(&format!("SELECT COUNT(*) FROM {layer}"), [], |row| {
+                            row.get(0)
+                        })
+                        .unwrap();
+                    assert_eq!(count, 2);
+                }
+            }
+            OutputFormat::Geoparquet => {
+                assert!(output.join("script_nodes.parquet").is_file());
+                assert!(output.join("script_ways.parquet").is_file());
+            }
+        }
+    }
+}
+
+#[test]
+fn rejects_duplicate_layers_across_scripts() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let first = script_named(
+        temp.path(),
+        "first.lua",
+        "osmdb.define_layer({ name = 'shared', source = 'node', columns = {{ name = 'id', type = 'int64' }} })",
+    );
+    let second = script_named(
+        temp.path(),
+        "second.lua",
+        "osmdb.define_layer({ name = 'shared', source = 'way', columns = {{ name = 'id', type = 'int64' }} })",
+    );
+    let output = temp.path().join("duplicate.gpkg");
+
+    let error = extract(ExtractOptions {
+        db,
+        scripts: vec![first, second],
+        format: OutputFormat::Geopackage,
+        output: output.clone(),
+        threads: 1,
+        wikidata_store: None,
+    })
+    .unwrap_err();
+
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("duplicate layer name 'shared'"),
+        "{message}"
+    );
+    assert!(message.contains("first.lua"), "{message}");
+    assert!(message.contains("second.lua"), "{message}");
+    assert!(!output.exists());
+}
+
+#[test]
+fn geometry_failure_in_one_script_discards_all_rows_for_the_object() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let metadata = script_named(
+        temp.path(),
+        "metadata.lua",
+        r#"
+        local metadata = osmdb.define_layer({ name = 'relation_metadata', source = 'relation', columns = {
+            { name = 'osm_id', type = 'int64', required = true },
+        } })
+        function osmdb.process_relation(object)
+            metadata:insert({ osm_id = object.id })
+        end
+        "#,
+    );
+    let geometry = script_named(
+        temp.path(),
+        "geometry.lua",
+        r#"
+        local geometry = osmdb.define_layer({ name = 'relation_geometry', source = 'relation', columns = {
+            { name = 'geometry', type = 'multilinestring', required = true },
+        } })
+        function osmdb.process_relation(object)
+            if object.id == 30 then
+                geometry:insert({ geometry = object:as_multilinestring() })
+            end
+        end
+        "#,
+    );
+    let output = temp.path().join("geometry-skip.gpkg");
+
+    let summary = extract(ExtractOptions {
+        db,
+        scripts: vec![metadata, geometry],
+        format: OutputFormat::Geopackage,
+        output: output.clone(),
+        threads: 2,
+        wikidata_store: None,
+    })
+    .unwrap();
+
+    assert_eq!(summary.geometry_skipped, 1);
+    assert_eq!(summary.rows_written, 4);
+    let connection = rusqlite::Connection::open(output).unwrap();
+    let skipped: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM relation_metadata WHERE osm_id = 30",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(skipped, 0);
+}
+
+#[test]
 fn writes_geopackage_and_skips_bad_geometry() {
     let temp = TempDir::new().unwrap();
     let db = fixture(temp.path());
@@ -326,7 +489,7 @@ fn writes_geopackage_and_skips_bad_geometry() {
     let output = temp.path().join("result.gpkg");
     let summary = extract(ExtractOptions {
         db,
-        script,
+        scripts: vec![script],
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 2,
@@ -407,7 +570,7 @@ fn writes_one_geoparquet_file_per_layer() {
     let output = temp.path().join("parquet-output");
     let summary = extract(ExtractOptions {
         db,
-        script,
+        scripts: vec![script],
         format: OutputFormat::Geoparquet,
         output: output.clone(),
         threads: 2,
@@ -459,7 +622,7 @@ fn geometry_type_mismatch_aborts_without_publishing_output() {
     let output = temp.path().join("bad.gpkg");
     let error = extract(ExtractOptions {
         db,
-        script,
+        scripts: vec![script],
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 2,
@@ -489,7 +652,7 @@ fn rejects_existing_output() {
     fs::write(&output, b"keep me").unwrap();
     let error = extract(ExtractOptions {
         db,
-        script,
+        scripts: vec![script],
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 1,
@@ -514,7 +677,7 @@ fn wikidata_lookup_is_available_to_parallel_lua_workers_and_preserves_json() {
         };
         let summary = extract(ExtractOptions {
             db: db.clone(),
-            script: script.clone(),
+            scripts: vec![script.clone()],
             format,
             output: output.clone(),
             threads: 2,
@@ -569,7 +732,7 @@ fn places_example_enriches_settlements_from_wikidata() {
         };
         let summary = extract(ExtractOptions {
             db: db.clone(),
-            script: script.clone(),
+            scripts: vec![script.clone()],
             format,
             output: output.clone(),
             threads: 2,
@@ -682,7 +845,7 @@ fn wikidata_lookup_returns_nil_when_no_store_is_configured() {
     let output = temp.path().join("without-wikidata.gpkg");
     let summary = extract(ExtractOptions {
         db,
-        script,
+        scripts: vec![script],
         format: OutputFormat::Geopackage,
         output,
         threads: 2,
@@ -712,7 +875,7 @@ fn invalid_wikidata_id_aborts_without_publishing_output() {
     let output = temp.path().join("invalid-wikidata.gpkg");
     let error = extract(ExtractOptions {
         db,
-        script,
+        scripts: vec![script],
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 2,
@@ -736,7 +899,7 @@ fn invalid_wikidata_store_fails_before_creating_output() {
     let output = temp.path().join("invalid-store.gpkg");
     let error = extract(ExtractOptions {
         db,
-        script,
+        scripts: vec![script],
         format: OutputFormat::Geopackage,
         output: output.clone(),
         threads: 1,

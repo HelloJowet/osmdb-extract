@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -8,7 +9,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::ValueEnum;
 use crossbeam_channel::bounded;
-use osmdb::{Database, DatabaseConfig, DatabaseReader, LOCATION_STORE_FILENAME};
+use osmdb::{
+    Database, DatabaseConfig, DatabaseReader, LOCATION_STORE_FILENAME, Node, Relation, Way,
+};
 use wikidata_store::WikidataStore;
 
 use crate::geometry::GeometryResolver;
@@ -25,7 +28,7 @@ pub enum OutputFormat {
 #[derive(Debug, Clone)]
 pub struct ExtractOptions {
     pub db: PathBuf,
-    pub script: PathBuf,
+    pub scripts: Vec<PathBuf>,
     pub format: OutputFormat,
     pub output: PathBuf,
     pub threads: usize,
@@ -71,10 +74,118 @@ impl Counters {
     }
 }
 
+struct ScriptWorker {
+    path: PathBuf,
+    layer_offset: usize,
+    worker: LuaWorker,
+}
+
+struct LuaWorkerGroup {
+    scripts: Vec<ScriptWorker>,
+    layers: Vec<crate::schema::LayerDef>,
+}
+
+impl LuaWorkerGroup {
+    fn new(
+        scripts: &[(PathBuf, Vec<u8>)],
+        resolver: Arc<GeometryResolver>,
+        wikidata_store: Option<Arc<WikidataStore>>,
+    ) -> Result<Self> {
+        let mut workers = Vec::with_capacity(scripts.len());
+        let mut layers = Vec::new();
+        let mut layer_origins = HashMap::<String, PathBuf>::new();
+
+        for (path, contents) in scripts {
+            let worker = LuaWorker::new_with_wikidata_store(
+                contents,
+                Arc::clone(&resolver),
+                wikidata_store.clone(),
+            )
+            .with_context(|| format!("failed to initialize Lua script '{}'", path.display()))?;
+            let layer_offset = layers.len();
+            for layer in worker.layers() {
+                if let Some(previous) = layer_origins.insert(layer.name.clone(), path.clone()) {
+                    bail!(
+                        "duplicate layer name '{}' in Lua scripts '{}' and '{}'",
+                        layer.name,
+                        previous.display(),
+                        path.display()
+                    );
+                }
+                layers.push(layer.clone());
+            }
+            workers.push(ScriptWorker {
+                path: path.clone(),
+                layer_offset,
+                worker,
+            });
+        }
+
+        Ok(Self {
+            scripts: workers,
+            layers,
+        })
+    }
+
+    fn layers(&self) -> &[crate::schema::LayerDef] {
+        &self.layers
+    }
+
+    fn process_node(&self, id: i64, node: Node) -> Result<ObjectOutcome> {
+        self.run(|worker| worker.process_node(id, node.clone()))
+    }
+
+    fn process_way(&self, id: i64, way: Way) -> Result<ObjectOutcome> {
+        self.run(|worker| worker.process_way(id, way.clone()))
+    }
+
+    fn process_relation(&self, id: i64, relation: Relation) -> Result<ObjectOutcome> {
+        self.run(|worker| worker.process_relation(id, relation.clone()))
+    }
+
+    fn run(
+        &self,
+        mut process: impl FnMut(&LuaWorker) -> Result<ObjectOutcome>,
+    ) -> Result<ObjectOutcome> {
+        let mut all_rows = Vec::new();
+        let mut geometry_failure = None;
+
+        for script in &self.scripts {
+            match process(&script.worker)
+                .with_context(|| format!("Lua script '{}' failed", script.path.display()))?
+            {
+                ObjectOutcome::Rows(mut rows) => {
+                    for row in &mut rows {
+                        row.layer_index += script.layer_offset;
+                    }
+                    all_rows.extend(rows);
+                }
+                ObjectOutcome::GeometrySkipped(reason) => {
+                    geometry_failure.get_or_insert_with(|| {
+                        format!("Lua script '{}': {reason}", script.path.display())
+                    });
+                }
+            }
+        }
+
+        match geometry_failure {
+            Some(reason) => Ok(ObjectOutcome::GeometrySkipped(reason)),
+            None => Ok(ObjectOutcome::Rows(all_rows)),
+        }
+    }
+}
+
 pub fn extract(options: ExtractOptions) -> Result<ExtractSummary> {
     validate_options(&options)?;
-    let script = fs::read(&options.script)
-        .with_context(|| format!("failed to read Lua script '{}'", options.script.display()))?;
+    let scripts = options
+        .scripts
+        .iter()
+        .map(|path| {
+            fs::read(path)
+                .with_context(|| format!("failed to read Lua script '{}'", path.display()))
+                .map(|contents| (path.clone(), contents))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let wikidata_store = options
         .wikidata_store
         .as_ref()
@@ -104,8 +215,8 @@ pub fn extract(options: ExtractOptions) -> Result<ExtractSummary> {
             Arc::clone(&database),
             &location_path,
         )?);
-        workers.push(Mutex::new(LuaWorker::new_with_wikidata_store(
-            &script,
+        workers.push(Mutex::new(LuaWorkerGroup::new(
+            &scripts,
             resolver,
             wikidata_store.clone(),
         )?));
@@ -304,8 +415,13 @@ fn validate_options(options: &ExtractOptions) -> Result<()> {
             LOCATION_STORE_FILENAME
         );
     }
-    if !options.script.is_file() {
-        bail!("Lua script '{}' does not exist", options.script.display());
+    if options.scripts.is_empty() {
+        bail!("at least one --script is required");
+    }
+    for script in &options.scripts {
+        if !script.is_file() {
+            bail!("Lua script '{}' does not exist", script.display());
+        }
     }
     if options.output.exists() {
         bail!("output path '{}' already exists", options.output.display());

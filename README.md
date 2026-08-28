@@ -1,6 +1,6 @@
 # osmdb-extract
 
-`osmdb-extract` turns an [osmdb](https://github.com/HelloJowet/osmdb) database into typed GeoPackage or GeoParquet datasets. Use a small Lua script to choose OpenStreetMap nodes, ways, or relations; keep the attributes you need; and write their geometry.
+`osmdb-extract` turns an [osmdb](https://github.com/HelloJowet/osmdb) database into typed GeoPackage or GeoParquet datasets. Use one or more small Lua scripts to choose OpenStreetMap nodes, ways, or relations; keep the attributes you need; and write their geometry.
 
 Way and relation geometry is built while the database is streamed, so focused extracts do not require loading the whole source dataset into memory.
 
@@ -29,6 +29,7 @@ This creates a `cafes` point layer and a `roads` line layer.
 
 ## Using the CLI
 
+- Repeat `--script` to run multiple scripts in one database scan and write all of their layers to the same output. Layer names must be unique across the scripts.
 - `--format geopackage` writes one new `.gpkg` file.
 - `--format geoparquet` writes a directory with one `<layer>.parquet` file per layer. Layers with geometry include GeoParquet metadata; other layers are regular Parquet tables.
 - Existing output paths are refused. Extraction writes beside the destination, then renames the result only after success.
@@ -42,6 +43,17 @@ Adapt a script from `examples/`:
 - `major_roads.lua`: motorway, trunk, and primary ways.
 - `places.lua`: named settlements enriched from an optional local Wikidata store.
 - `route_metadata.lua`: route attributes without relation geometry.
+
+For example, combine two focused scripts into one GeoPackage:
+
+```bash
+osmdb-extract \
+  --db ./region.osmdb \
+  --script examples/cafes.lua \
+  --script examples/major_roads.lua \
+  --format geopackage \
+  --output region.gpkg
+```
 
 ## Write a Lua script
 

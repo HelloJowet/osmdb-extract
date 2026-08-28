@@ -15,9 +15,9 @@ struct Cli {
     #[arg(long)]
     db: PathBuf,
 
-    /// Lua extraction configuration.
-    #[arg(long)]
-    script: PathBuf,
+    /// Lua extraction configuration. Repeat to run multiple scripts.
+    #[arg(long, required = true)]
+    script: Vec<PathBuf>,
 
     /// Output file format.
     #[arg(long, value_enum)]
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
 
     let summary = extract(ExtractOptions {
         db: cli.db,
-        script: cli.script,
+        scripts: cli.script,
         format: cli.format,
         output: cli.output.clone(),
         threads: cli.threads,
@@ -76,4 +76,46 @@ fn main() -> Result<()> {
         summary.geometry_skipped,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    #[test]
+    fn accepts_repeated_script_arguments() {
+        let cli = Cli::try_parse_from([
+            "osmdb-extract",
+            "--db",
+            "region.osmdb",
+            "--script",
+            "cafes.lua",
+            "--script",
+            "roads.lua",
+            "--format",
+            "geopackage",
+            "--output",
+            "region.gpkg",
+        ])
+        .unwrap();
+
+        assert_eq!(cli.script.len(), 2);
+    }
+
+    #[test]
+    fn requires_a_script_argument() {
+        let error = Cli::try_parse_from([
+            "osmdb-extract",
+            "--db",
+            "region.osmdb",
+            "--format",
+            "geopackage",
+            "--output",
+            "region.gpkg",
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("--script"));
+    }
 }
