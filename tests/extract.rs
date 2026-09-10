@@ -391,6 +391,182 @@ fn combines_multiple_scripts_in_one_output() {
 }
 
 #[test]
+fn creates_declared_composite_indexes_for_geopackage_and_ignores_them_for_geoparquet() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let script = script(
+        temp.path(),
+        r#"
+        local route_ways = osmdb.define_layer({
+            name = 'route_ways',
+            source = 'relation',
+            columns = {
+                { name = 'route_id', type = 'int64', required = true },
+                { name = 'way_id', type = 'int64', required = true },
+            },
+            indexes = {
+                { columns = { 'route_id', 'way_id' } },
+                { columns = { 'way_id', 'route_id' } },
+            },
+        })
+        function osmdb.process_relation(object)
+            route_ways:insert({ route_id = object.id, way_id = object.id + 1000 })
+        end
+        "#,
+    );
+
+    let geopackage = temp.path().join("indexes.gpkg");
+    extract(ExtractOptions {
+        db: db.clone(),
+        scripts: vec![script.clone()],
+        format: OutputFormat::Geopackage,
+        output: geopackage.clone(),
+        threads: 2,
+        wikidata_store: None,
+    })
+    .unwrap();
+
+    let connection = rusqlite::Connection::open(geopackage).unwrap();
+    for (name, expected_columns) in [
+        ("idx_route_ways_1", vec!["route_id", "way_id"]),
+        ("idx_route_ways_2", vec!["way_id", "route_id"]),
+    ] {
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.starts_with(&format!("CREATE INDEX \"{name}\"")),
+            "{sql}"
+        );
+
+        let mut statement = connection
+            .prepare(&format!("PRAGMA index_info(\"{name}\")"))
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(2))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(columns, expected_columns);
+    }
+
+    let geoparquet = temp.path().join("indexes-parquet");
+    extract(ExtractOptions {
+        db,
+        scripts: vec![script],
+        format: OutputFormat::Geoparquet,
+        output: geoparquet.clone(),
+        threads: 2,
+        wikidata_store: None,
+    })
+    .unwrap();
+    assert!(geoparquet.join("route_ways.parquet").is_file());
+    assert_eq!(fs::read_dir(geoparquet).unwrap().count(), 1);
+}
+
+#[test]
+fn bundled_examples_extract_successfully() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let examples = [
+        ("basic", include_str!("../examples/basic.lua")),
+        ("cafes", include_str!("../examples/cafes.lua")),
+        ("major-roads", include_str!("../examples/major_roads.lua")),
+        ("places", include_str!("../examples/places.lua")),
+        (
+            "route-metadata",
+            include_str!("../examples/route_metadata.lua"),
+        ),
+    ];
+
+    for (name, contents) in examples {
+        let script = script_named(temp.path(), &format!("example-{name}.lua"), contents);
+        let output = temp.path().join(format!("example-{name}.gpkg"));
+        extract(ExtractOptions {
+            db: db.clone(),
+            scripts: vec![script],
+            format: OutputFormat::Geopackage,
+            output: output.clone(),
+            threads: 2,
+            wikidata_store: None,
+        })
+        .unwrap_or_else(|error| panic!("example {name} failed: {error:#}"));
+        assert!(output.is_file());
+    }
+}
+
+#[test]
+fn rejects_invalid_index_declarations_without_publishing_output() {
+    let temp = TempDir::new().unwrap();
+    let db = fixture(temp.path());
+    let cases = [
+        (
+            "unknown-column",
+            "{ { columns = { 'missing' } } }",
+            "index references unknown column 'missing'",
+        ),
+        (
+            "empty-columns",
+            "{ { columns = {} } }",
+            "index with no columns",
+        ),
+        (
+            "repeated-column",
+            "{ { columns = { 'id', 'id' } } }",
+            "index repeats column 'id'",
+        ),
+        (
+            "duplicate-index",
+            "{ { columns = { 'id', 'other' } }, { columns = { 'id', 'other' } } }",
+            "duplicate index on columns (id, other)",
+        ),
+        (
+            "sparse-indexes",
+            "{ [1] = { columns = { 'id' } }, [3] = { columns = { 'other' } } }",
+            "layer indexes keys must be contiguous and start at 1",
+        ),
+        (
+            "sparse-columns",
+            "{ { columns = { [1] = 'id', [3] = 'other' } } }",
+            "index columns keys must be contiguous and start at 1",
+        ),
+        (
+            "unsupported-field",
+            "{ { columns = { 'id' }, unique = true } }",
+            "unsupported field 'unique'",
+        ),
+    ];
+
+    for (name, indexes, expected_error) in cases {
+        let script = script_named(
+            temp.path(),
+            &format!("{name}.lua"),
+            &format!(
+                "osmdb.define_layer({{ name = 'indexed', source = 'node', columns = {{ {{ name = 'id', type = 'int64' }}, {{ name = 'other', type = 'int64' }} }}, indexes = {indexes} }})"
+            ),
+        );
+        let output = temp.path().join(format!("{name}.gpkg"));
+        let error = extract(ExtractOptions {
+            db: db.clone(),
+            scripts: vec![script],
+            format: OutputFormat::Geopackage,
+            output: output.clone(),
+            threads: 1,
+            wikidata_store: None,
+        })
+        .unwrap_err();
+
+        let message = format!("{error:#}");
+        assert!(message.contains(expected_error), "{name}: {message}");
+        assert!(!output.exists(), "{name} unexpectedly published output");
+    }
+}
+
+#[test]
 fn rejects_duplicate_layers_across_scripts() {
     let temp = TempDir::new().unwrap();
     let db = fixture(temp.path());

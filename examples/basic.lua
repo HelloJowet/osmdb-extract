@@ -7,6 +7,9 @@ local cafes = osmdb.define_layer({
         { name = "tags", type = "json" },
         { name = "geometry", type = "point", required = true },
     },
+    indexes = {
+        { columns = { "osm_id" } },
+    },
 })
 
 local roads = osmdb.define_layer({
@@ -16,6 +19,10 @@ local roads = osmdb.define_layer({
         { name = "osm_id", type = "int64", required = true },
         { name = "class", type = "string", required = true },
         { name = "geometry", type = "linestring", required = true },
+    },
+    indexes = {
+        { columns = { "osm_id" } },
+        { columns = { "class", "osm_id" } },
     },
 })
 

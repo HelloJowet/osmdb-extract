@@ -12,6 +12,10 @@ local places = osmdb.define_layer({
         { name = "google_knowledge_graph_id", type = "string" },
         { name = "geometry", type = "point", required = true },
     },
+    indexes = {
+        { columns = { "osm_id" } },
+        { columns = { "place", "osm_id" } },
+    },
 })
 
 local settlement_places = {

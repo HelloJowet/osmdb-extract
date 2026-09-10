@@ -12,6 +12,10 @@ local routes = osmdb.define_layer({
         { name = "network", type = "string" },
         { name = "operator", type = "string" },
     },
+    indexes = {
+        { columns = { "osm_id" } },
+        { columns = { "route", "network" } },
+    },
 })
 
 function osmdb.process_relation(object)

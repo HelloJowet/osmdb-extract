@@ -115,6 +115,25 @@ Relation members have `type`, `id`, and `role`. Relation geometry follows nested
 
 Supported column types are `string`, `int64`, `double`, `boolean`, `json`, `point`, `linestring`, `multipoint`, `multilinestring`, and `geometrycollection`. Columns are nullable unless `required = true`, and a layer can have at most one geometry column. Layer and column names must be unique ASCII identifiers; `fid` is reserved for GeoPackage. IDs are not added automatically.
 
+Layers may declare ordinary SQLite B-tree indexes by listing their columns in lookup order:
+
+```lua
+local route_ways = osmdb.define_layer({
+    name = "route_ways",
+    source = "relation",
+    columns = {
+        { name = "route_id", type = "int64", required = true },
+        { name = "way_id", type = "int64", required = true },
+    },
+    indexes = {
+        { columns = { "route_id", "way_id" } },
+        { columns = { "way_id", "route_id" } },
+    },
+})
+```
+
+Index column order is significant. Indexes must reference columns in the same layer and may include geometry columns, although a geometry B-tree index does not provide spatial lookup. Exact duplicate indexes, repeated columns, empty indexes, and unsupported index fields are rejected. GeoPackage indexes receive deterministic names and are built after all rows are written, before database optimization. GeoParquet has no equivalent secondary-index feature, so declarations are validated but otherwise ignored with an informational log.
+
 If an object's requested geometry is missing, invalid, cyclic, or empty, its rows are skipped and extraction continues. Invalid schemas, values, fields, sources, or geometry types stop extraction with a script error.
 
 ## Roadmap

@@ -106,10 +106,16 @@ pub struct ColumnDef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexDef {
+    pub columns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerDef {
     pub name: String,
     pub source: SourceKind,
     pub columns: Vec<ColumnDef>,
+    pub indexes: Vec<IndexDef>,
 }
 
 impl LayerDef {
@@ -157,6 +163,33 @@ impl LayerDef {
                 "layer '{}' may define at most one geometry column",
                 self.name
             );
+        }
+
+        let mut index_definitions = HashSet::new();
+        for index in &self.indexes {
+            if index.columns.is_empty() {
+                bail!("layer '{}' has an index with no columns", self.name);
+            }
+            let mut index_columns = HashSet::new();
+            for column in &index.columns {
+                if !names.contains(column.as_str()) {
+                    bail!(
+                        "layer '{}' index references unknown column '{}'",
+                        self.name,
+                        column
+                    );
+                }
+                if !index_columns.insert(column.as_str()) {
+                    bail!("layer '{}' index repeats column '{}'", self.name, column);
+                }
+            }
+            if !index_definitions.insert(&index.columns) {
+                bail!(
+                    "layer '{}' has duplicate index on columns ({})",
+                    self.name,
+                    index.columns.join(", ")
+                );
+            }
         }
         Ok(())
     }

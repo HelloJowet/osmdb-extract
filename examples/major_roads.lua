@@ -9,6 +9,10 @@ local major_roads = osmdb.define_layer({
         { name = "ref", type = "string" },
         { name = "geometry", type = "linestring", required = true },
     },
+    indexes = {
+        { columns = { "osm_id" } },
+        { columns = { "class", "osm_id" } },
+    },
 })
 
 local major_classes = {

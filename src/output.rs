@@ -103,6 +103,11 @@ struct ParquetLayer {
 
 impl GeoParquetWriter {
     fn create(path: &Path, layers: &[LayerDef]) -> Result<Self> {
+        if layers.iter().any(|layer| !layer.indexes.is_empty()) {
+            tracing::info!(
+                "GeoParquet does not support secondary indexes; index declarations will be ignored"
+            );
+        }
         fs::create_dir(path).with_context(|| {
             format!("failed to create GeoParquet directory '{}'", path.display())
         })?;
@@ -345,15 +350,41 @@ impl GeoPackageWriter {
         Ok(())
     }
 
-    fn finish(self) -> Result<()> {
-        for (layer, extent) in self.layers.iter().zip(self.extents) {
+    fn finish(mut self) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for (layer, extent) in self.layers.iter().zip(&self.extents) {
             if let Some(extent) = extent {
-                self.connection.execute(
+                transaction.execute(
                     "UPDATE gpkg_contents SET min_x=?1, min_y=?2, max_x=?3, max_y=?4, last_change=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE table_name=?5",
                     rusqlite::params![extent.min_x, extent.min_y, extent.max_x, extent.max_y, layer.name],
                 )?;
             }
+            for (position, index) in layer.indexes.iter().enumerate() {
+                let index_name = format!("idx_{}_{}", layer.name, position + 1);
+                let columns = index
+                    .columns
+                    .iter()
+                    .map(|column| quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                transaction
+                    .execute(
+                        &format!(
+                            "CREATE INDEX {} ON {} ({columns})",
+                            quote_identifier(&index_name),
+                            quote_identifier(&layer.name)
+                        ),
+                        [],
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to create index '{index_name}' on layer '{}'",
+                            layer.name
+                        )
+                    })?;
+            }
         }
+        transaction.commit()?;
         self.connection.execute_batch("PRAGMA optimize;")?;
         Ok(())
     }

@@ -11,7 +11,7 @@ use wikidata_store::WikidataStore;
 
 use crate::geometry::{GeometryResolver, RelationGeometryKind};
 use crate::schema::{
-    ColumnDef, ColumnType, LayerDef, OutputRow, OutputValue, SourceKind, validate_schema,
+    ColumnDef, ColumnType, IndexDef, LayerDef, OutputRow, OutputValue, SourceKind, validate_schema,
 };
 
 #[derive(Default)]
@@ -578,9 +578,83 @@ fn parse_layer(definition: &Table) -> Result<LayerDef> {
             required,
         });
     }
+    let indexes = definition
+        .get::<Option<Table>>("indexes")?
+        .map(|indexes| parse_indexes(&indexes))
+        .transpose()?
+        .unwrap_or_default();
     Ok(LayerDef {
         name,
         source: SourceKind::parse(&source)?,
         columns: parsed_columns,
+        indexes,
     })
+}
+
+fn parse_indexes(indexes: &Table) -> Result<Vec<IndexDef>> {
+    strict_sequence(indexes, "layer indexes")?
+        .into_iter()
+        .enumerate()
+        .map(|(position, value)| {
+            let LuaValue::Table(index) = value else {
+                bail!("layer index {} must be a table", position + 1);
+            };
+            for pair in index.clone().pairs::<LuaValue, LuaValue>() {
+                let (key, _) = pair.context("invalid field in layer index")?;
+                let LuaValue::String(key) = key else {
+                    bail!("layer index {} fields must be strings", position + 1);
+                };
+                let key = key.to_str()?;
+                if key != "columns" {
+                    bail!(
+                        "layer index {} has unsupported field '{}'",
+                        position + 1,
+                        key
+                    );
+                }
+            }
+            let columns: Table = index.get("columns").with_context(|| {
+                format!(
+                    "layer index {} is missing table field 'columns'",
+                    position + 1
+                )
+            })?;
+            let columns = strict_sequence(&columns, "index columns")?
+                .into_iter()
+                .enumerate()
+                .map(|(column_position, value)| {
+                    let LuaValue::String(value) = value else {
+                        bail!(
+                            "column {} in layer index {} must be a string",
+                            column_position + 1,
+                            position + 1
+                        );
+                    };
+                    Ok(value.to_str()?.to_owned())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(IndexDef { columns })
+        })
+        .collect()
+}
+
+fn strict_sequence(table: &Table, description: &str) -> Result<Vec<LuaValue>> {
+    let mut entries = Vec::new();
+    for pair in table.clone().pairs::<LuaValue, LuaValue>() {
+        let (key, value) = pair.with_context(|| format!("invalid {description}"))?;
+        let LuaValue::Integer(key) = key else {
+            bail!("{description} must be a sequence with integer keys");
+        };
+        if key < 1 {
+            bail!("{description} keys must be contiguous and start at 1");
+        }
+        entries.push((key, value));
+    }
+    entries.sort_by_key(|(key, _)| *key);
+    for (position, (key, _)) in entries.iter().enumerate() {
+        if *key != position as i64 + 1 {
+            bail!("{description} keys must be contiguous and start at 1");
+        }
+    }
+    Ok(entries.into_iter().map(|(_, value)| value).collect())
 }

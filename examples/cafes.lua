@@ -7,6 +7,9 @@ local cafes = osmdb.define_layer({
         { name = "name", type = "string" },
         { name = "geometry", type = "point", required = true },
     },
+    indexes = {
+        { columns = { "osm_id" } },
+    },
 })
 
 function osmdb.process_node(object)
